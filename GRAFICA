@@ -9,8 +9,8 @@ from .core.config import settings
 from .core.security import ALGORITHM, SECRET_KEY, verify_password, create_access_token
 from . import models
 
-# Cria todas as tabelas no banco de dados
-Base.metadata.create_all(bind=engine)
+with:
+      source: siteBase.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
