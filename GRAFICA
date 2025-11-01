@@ -1,0 +1,474 @@
+# backend/app/main.py
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from .database import engine, Base, get_db
+from .api.v1.endpoints import auth, pedidos, clientes, produtos, orcamentos, notasfiscais
+from .core.config import settings
+from .core.security import ALGORITHM, SECRET_KEY, verify_password, create_access_token
+from . import models
+
+# Cria todas as tabelas no banco de dados
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.PROJECT_VERSION,
+    description="API para o Dashboard Gráfica Pro",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Inclui os roteadores (endpoints)
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Autenticação"])
+app.include_router(pedidos.router, prefix="/api/v1/pedidos", tags=["Pedidos"])
+app.include_router(clientes.router, prefix="/api/v1/clientes", tags=["Clientes"])
+app.include_router(produtos.router, prefix="/api/v1/produtos", tags=["Produtos"])
+app.include_router(orcamentos.router, prefix="/api/v1/orcamentos", tags=["Orçamentos"])
+app.include_router(notasfiscais.router, prefix="/api/v1/notasfiscais", tags=["Notas Fiscais"])
+
+@app.get("/")
+async def root():
+    return {"message": "Bem-vindo à API do Dashboard Gráfica Pro!"}# backend/app/database.py
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from .core.config import settings
+
+# URL de conexão com o banco de dados (pega de .env)
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+# Dependência para obter a sessão do banco de dados
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()# backend/app/core/config.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Dashboard Gráfica Pro API"
+    PROJECT_VERSION: str = "1.0.0"
+    DATABASE_URL: str
+    SECRET_KEY: str
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+settings = Settings()# backend/app/core/security.py
+from datetime import datetime, timedelta
+from typing import Optional
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from .config import settings
+
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt# backend/app/models.py
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from .database import Base
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
+    role = Column(String, default="editor") # admin, editor, viewer
+
+    pedidos = relationship("Pedido", back_populates="criado_por")
+    clientes = relationship("Cliente", back_populates="criado_por")
+
+class Cliente(Base):
+    __tablename__ = "clientes"
+    id = Column(Integer, primary_key=True, index=True)
+    nome_razao_social = Column(String, index=True)
+    cpf_cnpj = Column(String, unique=True, index=True)
+    email = Column(String)
+    telefone = Column(String)
+    endereco = Column(String)
+    data_cadastro = Column(DateTime(timezone=True), server_default=func.now())
+    criado_por_id = Column(Integer, ForeignKey("users.id"))
+
+    criado_por = relationship("User", back_populates="clientes")
+    pedidos = relationship("Pedido", back_populates="cliente")
+    orcamentos = relationship("Orcamento", back_populates="cliente")
+
+
+class Produto(Base):
+    __tablename__ = "produtos"
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String, index=True)
+    descricao = Column(Text, nullable=True)
+    categoria = Column(String) # Ex: Cartão de Visita, Folder, Banner
+    preco_base = Column(Float)
+    unidade_medida = Column(String, default="un") # Ex: un, m², m linear
+    is_ativo = Column(Boolean, default=True)
+    data_cadastro = Column(DateTime(timezone=True), server_default=func.now())
+    # Campos customizáveis para um produto gráfico, ex:
+    # tipo_papel = Column(String, nullable=True)
+    # acabamento = Column(String, nullable=True)
+    # cores = Column(String, nullable=True) # CMYK, Pantone
+    # tamanho = Column(String, nullable=True) # Ex: A4, 9x5cm
+
+    itens_pedido = relationship("ItemPedido", back_populates="produto")
+    itens_orcamento = relationship("ItemOrcamento", back_populates="produto")
+
+
+class Pedido(Base):
+    __tablename__ = "pedidos"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"))
+    data_pedido = Column(DateTime(timezone=True), server_default=func.now())
+    data_entrega_prevista = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String, default="Pendente") # Pendente, Em Produção, Concluído, Entregue, Cancelado
+    valor_total = Column(Float, default=0.0)
+    observacoes = Column(Text, nullable=True)
+    criado_por_id = Column(Integer, ForeignKey("users.id"))
+
+    cliente = relationship("Cliente", back_populates="pedidos")
+    criado_por = relationship("User", back_populates="pedidos")
+    itens = relationship("ItemPedido", back_populates="pedido", cascade="all, delete-orphan")
+    ordem_servico = relationship("OrdemServico", back_populates="pedido", uselist=False, cascade="all, delete-orphan")
+    nota_fiscal = relationship("NotaFiscal", back_populates="pedido", uselist=False, cascade="all, delete-orphan")
+
+
+class ItemPedido(Base):
+    __tablename__ = "itens_pedido"
+    id = Column(Integer, primary_key=True, index=True)
+    pedido_id = Column(Integer, ForeignKey("pedidos.id"))
+    produto_id = Column(Integer, ForeignKey("produtos.id"))
+    quantidade = Column(Float)
+    preco_unitario = Column(Float)
+    subtotal = Column(Float)
+    especificacoes = Column(Text, nullable=True) # Ex: "Cor: CMYK, Papel: Couchê 300g, Acabamento: Laminação Fosca"
+
+    pedido = relationship("Pedido", back_populates="itens")
+    produto = relationship("Produto", back_populates="itens_pedido")
+
+
+class OrdemServico(Base):
+    __tablename__ = "ordens_servico"
+    id = Column(Integer, primary_key=True, index=True)
+    pedido_id = Column(Integer, ForeignKey("pedidos.id"))
+    data_emissao = Column(DateTime(timezone=True), server_default=func.now())
+    data_inicio_producao = Column(DateTime(timezone=True), nullable=True)
+    data_fim_producao = Column(DateTime(timezone=True), nullable=True)
+    status_producao = Column(String, default="Aguardando Início") # Aguardando Início, Em Andamento, Concluída, Cancelada
+    observacoes = Column(Text, nullable=True)
+
+    pedido = relationship("Pedido", back_populates="ordem_servico")
+    etapas = relationship("EtapaOS", back_populates="ordem_servico", cascade="all, delete-orphan")
+
+
+class EtapaOS(Base):
+    __tablename__ = "etapas_os"
+    id = Column(Integer, primary_key=True, index=True)
+    ordem_servico_id = Column(Integer, ForeignKey("ordens_servico.id"))
+    nome_etapa = Column(String) # Ex: Design, Pré-impressão, Impressão, Acabamento, Expedição
+    status_etapa = Column(String, default="Pendente") # Pendente, Em Andamento, Concluída
+    data_inicio = Column(DateTime(timezone=True), nullable=True)
+    data_fim = Column(DateTime(timezone=True), nullable=True)
+    responsavel = Column(String, nullable=True)
+
+    ordem_servico = relationship("OrdemServico", back_populates="etapas")
+
+
+class Orcamento(Base):
+    __tablename__ = "orcamentos"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"))
+    data_orcamento = Column(DateTime(timezone=True), server_default=func.now())
+    validade_dias = Column(Integer, default=30)
+    valor_total = Column(Float, default=0.0)
+    status = Column(String, default="Pendente") # Pendente, Aprovado, Rejeitado, Convertido em Pedido
+    observacoes = Column(Text, nullable=True)
+    # pdf_path = Column(String, nullable=True) # Caminho para o PDF gerado
+
+    cliente = relationship("Cliente", back_populates="orcamentos")
+    itens = relationship("ItemOrcamento", back_populates="orcamento", cascade="all, delete-orphan")
+
+
+class ItemOrcamento(Base):
+    __tablename__ = "itens_orcamento"
+    id = Column(Integer, primary_key=True, index=True)
+    orcamento_id = Column(Integer, ForeignKey("orcamentos.id"))
+    produto_id = Column(Integer, ForeignKey("produtos.id"))
+    quantidade = Column(Float)
+    preco_unitario = Column(Float)
+    subtotal = Column(Float)
+    especificacoes = Column(Text, nullable=True) # Ex: "Cor: CMYK, Papel: Couchê 300g, Acabamento: Laminação Fosca"
+
+    orcamento = relationship("Orcamento", back_populates="itens")
+    produto = relationship("Produto", back_populates="itens_orcamento")
+
+
+class NotaFiscal(Base):
+    __tablename__ = "notas_fiscais"
+    id = Column(Integer, primary_key=True, index=True)
+    pedido_id = Column(Integer, ForeignKey("pedidos.id"), unique=True)
+    numero_nf = Column(String, unique=True, index=True)
+    data_emissao = Column(DateTime(timezone=True), server_default=func.now())
+    valor_total = Column(Float)
+    status_nf = Column(String, default="Emitida") # Emitida, Cancelada
+    # xml_path = Column(String, nullable=True) # Caminho para o XML da NF-e
+    # danfe_path = Column(String, nullable=True) # Caminho para o PDF (DANFE)
+
+    pedido = relationship("Pedido", back_populates="nota_fiscal")# backend/app/schemas.py
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional
+from datetime import datetime
+
+# --- Autenticação ---
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+class UserBase(BaseModel):
+    email: EmailStr
+    is_active: Optional[bool] = True
+    role: Optional[str] = "editor" # admin, editor, viewer
+
+class UserCreate(UserBase):
+    password: str
+
+class User(UserBase):
+    id: int
+    class Config:
+        from_attributes = True
+
+# --- Clientes ---
+class ClienteBase(BaseModel):
+    nome_razao_social: str = Field(..., max_length=100)
+    cpf_cnpj: str = Field(..., max_length=20)
+    email: Optional[EmailStr] = None
+    telefone: Optional[str] = Field(None, max_length=20)
+    endereco: Optional[str] = Field(None, max_length=200)
+
+class ClienteCreate(ClienteBase):
+    pass
+
+class ClienteUpdate(ClienteBase):
+    nome_razao_social: Optional[str] = Field(None, max_length=100)
+    cpf_cnpj: Optional[str] = Field(None, max_length=20)
+
+class Cliente(ClienteBase):
+    id: int
+    data_cadastro: datetime
+    criado_por_id: Optional[int] = None
+    class Config:
+        from_attributes = True
+
+# --- Produtos ---
+class ProdutoBase(BaseModel):
+    nome: str = Field(..., max_length=100)
+    descricao: Optional[str] = None
+    categoria: str = Field(..., max_length=50)
+    preco_base: float = Field(..., gt=0)
+    unidade_medida: str = Field("un", max_length=10)
+    is_ativo: Optional[bool] = True
+    # Campos customizáveis
+    # tipo_papel: Optional[str] = None
+    # acabamento: Optional[str] = None
+    # cores: Optional[str] = None
+    # tamanho: Optional[str] = None
+
+class ProdutoCreate(ProdutoBase):
+    pass
+
+class ProdutoUpdate(ProdutoBase):
+    nome: Optional[str] = Field(None, max_length=100)
+    categoria: Optional[str] = Field(None, max_length=50)
+    preco_base: Optional[float] = Field(None, gt=0)
+    is_ativo: Optional[bool] = None
+
+class Produto(ProdutoBase):
+    id: int
+    data_cadastro: datetime
+    class Config:
+        from_attributes = True
+
+# --- Itens de Pedido ---
+class ItemPedidoBase(BaseModel):
+    produto_id: int
+    quantidade: float = Field(..., gt=0)
+    preco_unitario: float = Field(..., gt=0)
+    especificacoes: Optional[str] = None
+
+class ItemPedidoCreate(ItemPedidoBase):
+    pass
+
+class ItemPedido(ItemPedidoBase):
+    id: int
+    subtotal: float
+    class Config:
+        from_attributes = True
+
+# --- Pedidos ---
+class PedidoBase(BaseModel):
+    cliente_id: int
+    data_entrega_prevista: Optional[datetime] = None
+    status: Optional[str] = Field("Pendente", max_length=50)
+    observacoes: Optional[str] = None
+
+class PedidoCreate(PedidoBase):
+    itens: List[ItemPedidoCreate]
+
+class PedidoUpdate(PedidoBase):
+    cliente_id: Optional[int] = None
+    itens: Optional[List[ItemPedidoCreate]] = None # Permite atualizar itens
+    # Nota: A atualização de itens é mais complexa e pode exigir lógica específica.
+
+class Pedido(PedidoBase):
+    id: int
+    data_pedido: datetime
+    valor_total: float
+    criado_por_id: Optional[int] = None
+    itens: List[ItemPedido] = []
+    class Config:
+        from_attributes = True
+
+# --- Etapas de Ordem de Serviço ---
+class EtapaOSBase(BaseModel):
+    nome_etapa: str = Field(..., max_length=100)
+    status_etapa: str = Field("Pendente", max_length=50)
+    data_inicio: Optional[datetime] = None
+    data_fim: Optional[datetime] = None
+    responsavel: Optional[str] = Field(None, max_length=100)
+
+class EtapaOSCreate(EtapaOSBase):
+    pass
+
+class EtapaOS(EtapaOSBase):
+    id: int
+    ordem_servico_id: int
+    class Config:
+        from_attributes = True
+
+# --- Ordem de Serviço ---
+class OrdemServicoBase(BaseModel):
+    pedido_id: int
+    data_inicio_producao: Optional[datetime] = None
+    data_fim_producao: Optional[datetime] = None
+    status_producao: Optional[str] = Field("Aguardando Início", max_length=50)
+    observacoes: Optional[str] = None
+
+class OrdemServicoCreate(OrdemServicoBase):
+    etapas: List[EtapaOSCreate] = []
+
+class OrdemServicoUpdate(OrdemServicoBase):
+    pedido_id: Optional[int] = None
+    etapas: Optional[List[EtapaOSCreate]] = None # Atualização de etapas mais complexa
+
+class OrdemServico(OrdemServicoBase):
+    id: int
+    data_emissao: datetime
+    etapas: List[EtapaOS] = []
+    class Config:
+        from_attributes = True
+
+# --- Itens de Orçamento ---
+class ItemOrcamentoBase(BaseModel):
+    produto_id: int
+    quantidade: float = Field(..., gt=0)
+    preco_unitario: float = Field(..., gt=0)
+    especificacoes: Optional[str] = None
+
+class ItemOrcamentoCreate(ItemOrcamentoBase):
+    pass
+
+class ItemOrcamento(ItemOrcamentoBase):
+    id: int
+    subtotal: float
+    class Config:
+        from_attributes = True
+
+# --- Orçamentos ---
+class OrcamentoBase(BaseModel):
+    cliente_id: int
+    validade_dias: Optional[int] = Field(30, gt=0)
+    status: Optional[str] = Field("Pendente", max_length=50)
+    observacoes: Optional[str] = None
+
+class OrcamentoCreate(OrcamentoBase):
+    itens: List[ItemOrcamentoCreate]
+
+class OrcamentoUpdate(OrcamentoBase):
+    cliente_id: Optional[int] = None
+    validade_dias: Optional[int] = None
+    status: Optional[str] = None
+    itens: Optional[List[ItemOrcamentoCreate]] = None # Atualização de itens mais complexa
+
+class Orcamento(OrcamentoBase):
+    id: int
+    data_orcamento: datetime
+    valor_total: float
+    # pdf_path: Optional[str] = None
+    itens: List[ItemOrcamento] = []
+    class Config:
+        from_attributes = True
+
+# --- Notas Fiscais ---
+class NotaFiscalBase(BaseModel):
+    pedido_id: int
+    numero_nf: str = Field(..., max_length=50)
+    valor_total: float = Field(..., gt=0)
+    status_nf: Optional[str] = Field("Emitida", max_length=50)
+    # xml_path: Optional[str] = None
+    # danfe_path: Optional[str] = None
+
+class NotaFiscalCreate(NotaFiscalBase):
+    pass
+
+class NotaFiscalUpdate(NotaFiscalBase):
+    numero_nf: Optional[str] = None
+    valor_total: Optional[float] = None
+    status_nf: Optional[str] = None
+
+class NotaFiscal(NotaFiscalBase):
+    id: int
+    data_emissao: datetime
+    class Config:
+        from_attributes = True# backend/requirements.txt
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary # Driver para PostgreSQL
+pydantic-settings
+python-jose[cryptography] # Para JWT
+passlib[bcrypt] # Para hashing de senhas
+# alembic # Para migrações de banco de dados (opcional, mas recomendado)# backend/.env.example
+DATABASE_URL="postgresql://user:password@db:5432/grafica_db"
+SECRET_KEY="SUA_CHAVE_SECRETA_MUITO_FORTE_AQUI" # Mude para uma string aleatória longa
+ALGORITHM="HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES=30
